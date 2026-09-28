@@ -1,111 +1,113 @@
-/**
- * STM32F3 Discovery
- * 1. Turn ALL 8 LEDs ON
- * 2. Watch the blue USER button
- * 3. If you press the button, turn ALL LEDs OFF
- */
+#include <stdint.h>
 
-#include <stdint.h>   /* uint32_t = a 32-bit number */
+/* STM32F303 baziniai adresai */
+#define RCC_BASE    0x40021000UL
+#define GPIOE_BASE  0x48001000UL
+#define TIM1_BASE   0x40012C00UL
 
-#define RCC_BASE      0x40021000UL   /* clock office address */
-#define GPIOA_BASE    0x48000000UL   /* port A address — button */
-#define GPIOE_BASE    0x48001000UL   /* port E address — LEDs */
+#define RCC_AHBENR   (*(volatile uint32_t *)(RCC_BASE + 0x14))
+#define RCC_APB2ENR  (*(volatile uint32_t *)(RCC_BASE + 0x18))
 
-#define RCC_AHBENR    (*(volatile uint32_t *)(RCC_BASE + 0x14))   /* clock on/off page */
+#define GPIOE_MODER    (*(volatile uint32_t *)(GPIOE_BASE + 0x00))
+#define GPIOE_OTYPER   (*(volatile uint32_t *)(GPIOE_BASE + 0x04))
+#define GPIOE_OSPEEDR  (*(volatile uint32_t *)(GPIOE_BASE + 0x08))
+#define GPIOE_PUPDR    (*(volatile uint32_t *)(GPIOE_BASE + 0x0C))
+#define GPIOE_AFRH     (*(volatile uint32_t *)(GPIOE_BASE + 0x24))
 
-#define GPIOA_MODER   (*(volatile uint32_t *)(GPIOA_BASE + 0x00))  /* in or out? */
-#define GPIOA_PUPDR   (*(volatile uint32_t *)(GPIOA_BASE + 0x0C))  /* pull up or down? */
-#define GPIOA_IDR     (*(volatile uint32_t *)(GPIOA_BASE + 0x10))  /* voltage right now */
+#define TIM1_CR1    (*(volatile uint32_t *)(TIM1_BASE + 0x00))
+#define TIM1_EGR    (*(volatile uint32_t *)(TIM1_BASE + 0x14))
+#define TIM1_CCMR1  (*(volatile uint32_t *)(TIM1_BASE + 0x18))
+#define TIM1_CCER   (*(volatile uint32_t *)(TIM1_BASE + 0x20))
+#define TIM1_PSC    (*(volatile uint32_t *)(TIM1_BASE + 0x28))
+#define TIM1_ARR    (*(volatile uint32_t *)(TIM1_BASE + 0x2C))
+#define TIM1_CCR1   (*(volatile uint32_t *)(TIM1_BASE + 0x34))
+#define TIM1_BDTR   (*(volatile uint32_t *)(TIM1_BASE + 0x44))
 
-#define GPIOE_MODER   (*(volatile uint32_t *)(GPIOE_BASE + 0x00))  /* in or out? */
-#define GPIOE_OTYPER  (*(volatile uint32_t *)(GPIOE_BASE + 0x04))  /* push-pull or open-drain? */
-#define GPIOE_OSPEEDR (*(volatile uint32_t *)(GPIOE_BASE + 0x08))  /* how fast? */
-#define GPIOE_PUPDR   (*(volatile uint32_t *)(GPIOE_BASE + 0x0C))  /* pull up or down? */
-#define GPIOE_BSRR    (*(volatile uint32_t *)(GPIOE_BASE + 0x18))  /* turn pin ON or OFF */
+#define RCC_AHBENR_GPIOEEN   (1UL << 21)
+#define RCC_APB2ENR_TIM1EN   (1UL << 11)
+#define TIM_EGR_UG           (1UL << 0)
+#define TIM_CCMR1_OC1PE      (1UL << 3)
+#define TIM_CCER_CC1E        (1UL << 0)
+#define TIM_BDTR_MOE         (1UL << 15)
+#define TIM_CR1_CEN          (1UL << 0)
+#define TIM_CR1_ARPE         (1UL << 7)
 
-#define RCC_AHBENR_GPIOAEN  (1UL << 17)  /* bit 17 wakes port A */
-#define RCC_AHBENR_GPIOEEN  (1UL << 21)  /* bit 21 wakes port E */
+int i = 0;
+int direction = 1;
 
-#define LED_PINS_MASK  (0xFFu << 8)  /* bits 8..15 = eight LED pins */
-#define USER_BTN_PIN   (1u << 0)     /* bit 0 = PA0 = blue USER button */
-
-/* Wait. A button bounces. Looking too fast sees fake extra presses. */
-static void delay(volatile uint32_t count)
+static void delay_ms(uint32_t ms)
 {
-    while (count--) {   /* count down to 0 */
-        /* do nothing — waste time */
+    /* Apytikslis ~1 ms @ 8 MHz HSI. Jei SYSCLK 72 MHz — padidink 800 iki ~7200. */
+    for (uint32_t t = 0; t < ms; t++) {
+        for (volatile uint32_t n = 0; n < 800; n++) {
+            __asm volatile ("nop");
+        }
     }
 }
 
-/* Homework 1: turn clocks on with RCC */
-static void rcc_init(void)
+static void rcc_enable(void)
 {
-    RCC_AHBENR |= RCC_AHBENR_GPIOAEN;  /* wake port A (button) */
-    RCC_AHBENR |= RCC_AHBENR_GPIOEEN;  /* wake port E (LEDs) */
-    (void)RCC_AHBENR;                  /* read back so the clock really starts */
+    RCC_AHBENR  |= RCC_AHBENR_GPIOEEN;  /* GPIOE */
+    RCC_APB2ENR |= RCC_APB2ENR_TIM1EN;  /* TIM1  */
 }
 
-/* Homework 2: LED pins = OUTPUTS */
-static void gpio_leds_init(void)
+static void gpio_led_af_tim1(void)
 {
-    /* 2 bits per pin in MODER: 00=in 01=out 10=special 11=analog
-       pins 8..15 use bits 16..31. 0x5555 = 01 repeated 8 times */
-    GPIOE_MODER &= ~(0xFFFFu << 16);   /* erase old mode of pins 8..15 */
-    GPIOE_MODER |=  (0x5555u << 16);   /* write "output" on every LED pin */
+    /* PE9 = AF, push-pull, AF2 = TIM1_CH1 (LD3 raudonas) */
+    GPIOE_MODER   &= ~(3UL << (9 * 2));
+    GPIOE_MODER   |=  (2UL << (9 * 2));   /* Alternate function */
 
-    GPIOE_OTYPER &= ~LED_PINS_MASK;    /* 0 = push-pull: force HIGH and LOW */
+    GPIOE_OTYPER  &= ~(1UL << 9);
+    GPIOE_OSPEEDR |=  (3UL << (9 * 2));
+    GPIOE_PUPDR   &= ~(3UL << (9 * 2));
 
-    GPIOE_OSPEEDR &= ~(0xFFFFu << 16); /* 00 = slow. LED does not need speed */
-
-    GPIOE_PUPDR &= ~(0xFFFFu << 16);   /* 00 = no pull. We drive the LED */
+    GPIOE_AFRH    &= ~(0xFUL << ((9 - 8) * 4));
+    GPIOE_AFRH    |=  (2UL   << ((9 - 8) * 4));  /* AF2 */
 }
 
-/* Homework 3: button pin = INPUT */
-static void gpio_button_init(void)
+static void timer_pwm_init(void)
 {
-    GPIOA_MODER &= ~(3u << 0);  /* wipe 2 mode bits of pin 0 → 00 = input */
+    TIM1_CR1   = 0;
+    TIM1_PSC   = 7;     /* 8 MHz / 8 = 1 MHz. Jei 72 MHz: PSC = 71 */
+    TIM1_ARR   = 99;    /* fiksuotas periodas, 100 žingsnių */
+    TIM1_CCR1  = 0;
 
-    GPIOA_PUPDR &= ~(3u << 0);  /* wipe 2 pull bits of pin 0 */
-    GPIOA_PUPDR |=  (2u << 0);  /* 10 = pull-down: stays 0 until press */
+    /* PWM mode 1 (OC1M = 110), preload */
+    TIM1_CCMR1 = (6UL << 4) | TIM_CCMR1_OC1PE;
+
+    TIM1_CCER  = TIM_CCER_CC1E;
+    TIM1_BDTR  = TIM_BDTR_MOE;   /* privaloma TIM1 */
+    TIM1_EGR   = TIM_EGR_UG;
+    TIM1_CR1   = TIM_CR1_ARPE | TIM_CR1_CEN;
 }
 
-/* Light every LED. BSRR bits 0..15: write 1 → pin becomes 1. */
-static void leds_on(void)
+static void TimerFunction(int duty)
 {
-    GPIOE_BSRR = LED_PINS_MASK;  /* PE8..PE15 = 1 → LEDs ON */
-}
-
-/* Dark every LED. BSRR bits 16..31: write 1 → pin becomes 0. */
-static void leds_off(void)
-{
-    GPIOE_BSRR = (LED_PINS_MASK << 16);  /* PE8..PE15 = 0 → LEDs OFF */
-}
-
-/* Homework 4: read button. 1 = pressed, 0 = not.
-   Press connects PA0 to 3.3 V, so bit 0 becomes 1. */
-static uint32_t user_button_pressed(void)
-{
-    return (GPIOA_IDR & USER_BTN_PIN) != 0u;  /* is bit 0 a 1? */
+    if (duty < 0)   duty = 0;
+    if (duty > 100) duty = 100;
+    TIM1_CCR1 = (uint32_t)duty;
 }
 
 int main(void)
 {
-    rcc_init();          /* clocks ON */
-    gpio_leds_init();    /* LED pins = outputs */
-    gpio_button_init();  /* button pin = input */
-    leds_on();           /* start with ALL lights ON */
+    rcc_enable();
+    gpio_led_af_tim1();
+    timer_pwm_init();
 
-    while (1) {   /* never stop — keep watching the button */
-        if (user_button_pressed()) {             /* blue button down? */
-            delay(200000);                       /* wait, bounce dies */
-            if (user_button_pressed()) {         /* still down? real press */
-                leds_off();                      /* Homework 5: LEDs OFF */
-                while (user_button_pressed()) {  /* wait until finger lets go */
-                    /* do nothing */
-                }
-                delay(200000);                   /* wait after release too */
-            }
+    i = 0;
+    direction = 1;
+
+    while (1) {
+        TimerFunction(i);
+        delay_ms(15);
+
+        i += direction;
+        if (i >= 100) {
+            i = 100;
+            direction = -1;
+        } else if (i <= 0) {
+            i = 0;
+            direction = 1;
         }
-        /* button not pressed → do nothing */
     }
 }
